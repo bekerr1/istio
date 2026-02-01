@@ -29,23 +29,24 @@ import (
 )
 
 type meshDataplane struct {
-	kubeClient         kubernetes.Interface
-	netServer          MeshDataplane
-	hostIptables       *iptables.IptablesConfigurator
-	hostsideProbeIPSet ipset.IPSet
+	kubeClient              kubernetes.Interface
+	netServer               MeshDataplane
+	hostIptables            *iptables.IptablesConfigurator
+	hostsideProbeIPSet      ipset.IPSet
+	interfaceExclusionRules *util.CompiledInterfaceExclusionRules
 }
 
 // ConstructInitialSnapshot is always called first, before Start.
 // It takes a "snapshot" of ambient pods that were already running when the server started,
 // and constructs various required "state" (adding the pods to the host-level node ipset,
 // building the state of the world snapshot send to connecting ztunnels)
-func (s *meshDataplane) ConstructInitialSnapshot(existingAmbientPods []*corev1.Pod) error {
+func (s *meshDataplane) ConstructInitialSnapshot(existingAmbientPods []*corev1.Pod, namespaces map[string]*corev1.Namespace) error {
 	if err := s.syncHostIPSets(existingAmbientPods); err != nil {
 		log.Errorf("failed to sync host IPset: %v", err)
 		return err
 	}
 
-	return s.netServer.ConstructInitialSnapshot(existingAmbientPods)
+	return s.netServer.ConstructInitialSnapshot(existingAmbientPods, namespaces)
 }
 
 // ConstructInitialSnapshot should always be invoked before this function.
@@ -89,14 +90,14 @@ func (s *meshDataplane) Stop(skipCleanup bool) {
 // If the *last* step of sending the pod to ztunnel fails, then the pod will still be annotated
 // with a partially-captured status (indicating it has been mutated/redirected, and thus potentially
 // needs cleanup) and the error will be returned, indicating that the function call can be retried.
-func (s *meshDataplane) AddPodToMesh(ctx context.Context, pod *corev1.Pod, podIPs []netip.Addr, netNs string) error {
+func (s *meshDataplane) AddPodToMesh(ctx context.Context, pod *corev1.Pod, podIPs []netip.Addr, netNs string, ns *corev1.Namespace) error {
 	// Ordering is important in this func:
 	//
 	// - Inject rules and add to ztunnel FIRST
 	// - Annotate IF rule injection doesn't fail.
 	// - Add pod IP to ipset IF none of the above has failed, as a last step
 	log := log.WithLabels("ns", pod.Namespace, "name", pod.Name)
-	if err := s.netServer.AddPodToMesh(ctx, pod, podIPs, netNs); err != nil {
+	if err := s.netServer.AddPodToMesh(ctx, pod, podIPs, netNs, ns); err != nil {
 		// iptables injection failed, this is not a "retryable partial add"
 		// this is a nonrecoverable/nonretryable error and we won't even bother to
 		// annotate the pod or retry the event.
@@ -127,6 +128,16 @@ func (s *meshDataplane) AddPodToMesh(ctx context.Context, pod *corev1.Pod, podIP
 		// never fail, or isn't usefully retryable.
 		// For now tho, err on the side of being loud in the logs,
 		// since retrying in that case isn't _harmful_ and means all pods will fail anyway.
+		return err
+	}
+
+	// Annotate with excluded interfaces before enrollment annotation.
+	// This allows the informer to detect changes and trigger reconfiguration during pod reconcile.
+	excludedInterfaces := s.getExcludedInterfacesForPod(ns)
+	log.Debugf("annotating pod %s/%s with excluded interfaces: %v",
+		pod.Namespace, pod.Name, excludedInterfaces)
+	if err := util.AnnotatePodWithExcludedInterfaces(s.kubeClient, &pod.ObjectMeta, excludedInterfaces); err != nil {
+		log.Errorf("failed to annotate excluded interfaces: %v", err)
 		return err
 	}
 
@@ -177,7 +188,14 @@ func (s *meshDataplane) RemovePodFromMesh(ctx context.Context, pod *corev1.Pod, 
 	// This should be the last step in all cases - once we do this, the CP will no longer consider
 	// this pod "ambient" (and the informer will not be able to retry on removal errors),
 	// regardless of the state it is in.
-	log.Debug("removing annotation from pod")
+	log.Debug("removing annotations from pod")
+
+	// Remove interface exclusion annotation before unenrollment annotation
+	if err := util.AnnotatePodWithExcludedInterfaces(s.kubeClient, &pod.ObjectMeta, nil); err != nil {
+		log.Errorf("failed to remove interface exclusion annotation: %v", err)
+		// Non-fatal, continue with unenrollment
+	}
+
 	if err := util.AnnotateUnenrollPod(s.kubeClient, &pod.ObjectMeta); err != nil {
 		log.Errorf("failed to annotate pod unenrollment: %v", err)
 		// If the pod is already terminating anyway, we don't care if we can't remove the annotation,
@@ -190,6 +208,34 @@ func (s *meshDataplane) RemovePodFromMesh(ctx context.Context, pod *corev1.Pod, 
 	}
 
 	return nil
+}
+
+func (s *meshDataplane) ReconcileExistingPod(pod *corev1.Pod, ns *corev1.Namespace) error {
+
+	// TODO: how can or should the error be handled? Other parts of the code either return
+	// the error as non-retryable or just log it with advice. Seems like proping an error
+	// to callers here is useless?
+	if err := s.netServer.ReconcileExistingPod(pod, ns); err != nil {
+		log.Errorf("failed to reconcile inpod rules for pod: %v", err)
+		return nil
+	}
+
+	excludedInterfaces := s.getExcludedInterfacesForPod(ns)
+	log.Debugf("(re)annotating pod %s/%s with excluded interfaces: %v",
+		pod.Namespace, pod.Name, excludedInterfaces)
+	if err := util.AnnotatePodWithExcludedInterfaces(s.kubeClient, &pod.ObjectMeta, excludedInterfaces); err != nil {
+		log.Errorf("failed to annotate excluded interfaces: %v", err)
+		return err
+	}
+	return nil
+}
+
+// getExcludedInterfacesForPod returns interfaces to exclude based on namespace labels.
+func (s *meshDataplane) getExcludedInterfacesForPod(ns *corev1.Namespace) []string {
+	if s.interfaceExclusionRules == nil || ns == nil {
+		return nil
+	}
+	return s.interfaceExclusionRules.GetExcludedInterfaces(ns.Labels)
 }
 
 // syncHostIPSets is called after the host node ipset has been created (or found + flushed)

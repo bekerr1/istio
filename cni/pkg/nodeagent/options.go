@@ -46,12 +46,13 @@ const (
 )
 
 type AmbientArgs struct {
-	SystemNamespace            string
-	Revision                   string
-	KubeConfig                 string
-	ServerSocket               string
-	EnablementSelector         *util.CompiledEnablementSelectors
-	DNSCapture                 bool
-	EnableIPv6                 bool
-	ReconcilePodRulesOnStartup bool
+	SystemNamespace             string
+	Revision                    string
+	KubeConfig                  string
+	ServerSocket                string
+	EnablementSelector          *util.CompiledEnablementSelectors
+	InterfaceExclusionRules     *util.CompiledInterfaceExclusionRules
+	DNSCapture                  bool
+	EnableIPv6                  bool
+	ReconcilePodRulesOnStartup  bool
 }

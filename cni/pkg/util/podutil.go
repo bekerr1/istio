@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/netip"
 	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -29,6 +30,7 @@ import (
 	"istio.io/api/annotation"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/log"
+	"istio.io/istio/pkg/slices"
 )
 
 var annotationEnabledPatch = []byte(fmt.Sprintf(
@@ -176,4 +178,75 @@ func CheckBooleanAnnotation(pod *corev1.Pod, annotationName string) (bool, bool)
 	}
 
 	return false, false
+}
+
+// GetPodExcludedInterfaces returns the list of interfaces currently excluded on the pod.
+// Returns nil if the annotation is not present or empty.
+func GetPodExcludedInterfaces(pod *corev1.Pod) []string {
+	if pod == nil {
+		return nil
+	}
+
+	interfacesStr, exists := pod.GetAnnotations()[constants.AmbientExcludedInterfaces]
+	if !exists || interfacesStr == "" {
+		return nil
+	}
+
+	interfaces := strings.Split(interfacesStr, ",")
+	var result []string
+	for _, iface := range interfaces {
+		trimmed := strings.TrimSpace(iface)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+
+	return result
+}
+
+// AnnotatePodWithExcludedInterfaces annotates a pod with excluded interfaces.
+// If interfaces is nil or empty, removes the annotation.
+func AnnotatePodWithExcludedInterfaces(client kubernetes.Interface, pod *metav1.ObjectMeta, interfaces []string) error {
+	var patchBytes []byte
+
+	// TODO: Ensure this update removes the annotation entry altogether as opposed to just having the key with an empty string
+	if len(interfaces) == 0 {
+		patchBytes = []byte(fmt.Sprintf(
+			`{"metadata":{"annotations":{"%s":null}}}`,
+			constants.AmbientExcludedInterfaces,
+		))
+	} else {
+		interfacesStr := strings.Join(interfaces, ",")
+		patchBytes = []byte(fmt.Sprintf(
+			`{"metadata":{"annotations":{"%s":"%s"}}}`,
+			constants.AmbientExcludedInterfaces,
+			interfacesStr,
+		))
+	}
+
+	_, err := client.CoreV1().
+		Pods(pod.Namespace).
+		Patch(
+			context.Background(),
+			pod.Name,
+			types.MergePatchType,
+			patchBytes,
+			metav1.PatchOptions{},
+			"status",
+		)
+	return err
+}
+
+// ExcludedInterfacesChanged compares current vs desired excluded interfaces.
+// Returns true if they differ (order-independent comparison).
+// Treats nil and empty slices as equivalent.
+func ExcludedInterfacesChanged(current, desired []string) bool {
+	if len(current) == 0 && len(desired) == 0 {
+		return false
+	}
+	return !slices.EqualUnordered(current, desired)
 }

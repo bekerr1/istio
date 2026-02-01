@@ -35,11 +35,13 @@ var log = scopes.CNIAgent
 
 type MeshDataplane interface {
 	// MUST be called first, (even before Start()).
-	ConstructInitialSnapshot(existingAmbientPods []*corev1.Pod) error
+	ConstructInitialSnapshot(existingAmbientPods []*corev1.Pod, namespaces map[string]*corev1.Namespace) error
 	Start(ctx context.Context)
 
-	AddPodToMesh(ctx context.Context, pod *corev1.Pod, podIPs []netip.Addr, netNs string) error
+	AddPodToMesh(ctx context.Context, pod *corev1.Pod, podIPs []netip.Addr, netNs string, ns *corev1.Namespace) error
 	RemovePodFromMesh(ctx context.Context, pod *corev1.Pod, isDelete bool) error
+
+	ReconcileExistingPod(pod *corev1.Pod, ns *corev1.Namespace) error
 
 	Stop(skipCleanup bool)
 }
@@ -74,7 +76,7 @@ func NewServer(ctx context.Context, ready *atomic.Value, pluginSocket string, ar
 	}
 
 	s.NotReady()
-	s.handlers = setupHandlers(s.ctx, s.kubeClient, s.dataplane, args.SystemNamespace, args.EnablementSelector)
+	s.handlers = setupHandlers(s.ctx, s.kubeClient, s.dataplane, args.SystemNamespace, args.EnablementSelector, args.InterfaceExclusionRules)
 
 	cniServer := startCniPluginServer(ctx, pluginSocket, s.handlers, s.dataplane)
 	err = cniServer.Start()
@@ -98,8 +100,8 @@ func (s *Server) Start() {
 	log.Info("CNI ambient server starting")
 	s.kubeClient.RunAndWait(s.ctx.Done())
 	log.Info("CNI ambient server kubeclient started")
-	pods := s.handlers.GetActiveAmbientPodSnapshot()
-	err := s.dataplane.ConstructInitialSnapshot(pods)
+	pods, namespaces := s.handlers.GetActiveAmbientPodSnapshot()
+	err := s.dataplane.ConstructInitialSnapshot(pods, namespaces)
 	// Start the informer handlers FIRST, before we snapshot.
 	// They will keep the (mutex'd) snapshot cache synced.
 	s.handlers.Start()
