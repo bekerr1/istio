@@ -165,7 +165,7 @@ func (cfg *IptablesConfigurator) executeDeleteCommands(log *istiolog.Scope) {
 
 // Setup iptables rules for in-pod mode. Ideally this should be an idempotent function.
 // NOTE that this expects to be run from within the pod network namespace!
-func (cfg *IptablesConfigurator) CreateInpodRules(log *istiolog.Scope, podOverrides config.PodLevelOverrides) error {
+func (cfg *IptablesConfigurator) CreateInpodRules(log *istiolog.Scope, podOverrides config.PodOverrides) error {
 	// Append our rules here
 	builder := cfg.AppendInpodRules(podOverrides)
 
@@ -186,7 +186,7 @@ func (cfg *IptablesConfigurator) CreateInpodRules(log *istiolog.Scope, podOverri
 	return nil
 }
 
-func (cfg *IptablesConfigurator) AppendInpodRules(podOverrides config.PodLevelOverrides) *builder.IptablesRuleBuilder {
+func (cfg *IptablesConfigurator) AppendInpodRules(podOverrides config.PodOverrides) *builder.IptablesRuleBuilder {
 	var redirectDNS bool
 
 	switch podOverrides.DNSProxy {
@@ -275,6 +275,27 @@ func (cfg *IptablesConfigurator) AppendInpodRules(podOverrides config.PodLevelOv
 		}
 	}
 
+	// Short-circuit for excluded interfaces
+	// Mimics the sidecar shortCircuitExcludeInterfaces implementation
+	for _, excludeInterface := range podOverrides.ExcludeInterfaces {
+		iptablesBuilder.AppendRule(
+			ChainInpodPrerouting, "nat", "-i", excludeInterface, "-j", "RETURN")
+		iptablesBuilder.AppendRule(
+			ChainInpodOutput, "nat", "-o", excludeInterface, "-j", "RETURN")
+		// Ambient always uses TPROXY, so add mangle rules
+		iptablesBuilder.AppendRule(
+			ChainInpodPrerouting, "mangle", "-i", excludeInterface, "-j", "RETURN")
+		iptablesBuilder.AppendRule(
+			ChainInpodOutput, "mangle", "-o", excludeInterface, "-j", "RETURN")
+		// If DNS capture is enabled, also add raw table rules
+		if redirectDNS {
+			iptablesBuilder.AppendRule(
+				ChainInpodPrerouting, "raw", "-i", excludeInterface, "-j", "RETURN")
+			iptablesBuilder.AppendRule(
+				ChainInpodOutput, "raw", "-o", excludeInterface, "-j", "RETURN")
+		}
+	}
+
 	// CLI: -A ISTIO_PRERT -m mark --mark 0x539/0xfff -j CONNMARK --set-xmark 0x111/0xfff
 	//
 	// DESC: If we have a packet mark, set a connmark.
@@ -282,6 +303,16 @@ func (cfg *IptablesConfigurator) AppendInpodRules(podOverrides config.PodLevelOv
 		"--mark", inpodMark,
 		"-j", "CONNMARK",
 		"--set-xmark", inpodTproxyMark)
+
+	if !podOverrides.IngressMode {
+		// CLI: -A ISTIO_PRERT -m mark --mark 0x539/0xfff -j CONNMARK --set-xmark 0x111/0xfff
+		//
+		// DESC: If we have a packet mark, set a connmark.
+		iptablesBuilder.AppendRule(ChainInpodPrerouting, "mangle", "-m", "mark",
+			"--mark", inpodMark,
+			"-j", "CONNMARK",
+			"--set-xmark", inpodTproxyMark)
+	}
 
 	if !podOverrides.IngressMode {
 		// Handle healthcheck probes from the host node. In the host netns, before the packet enters the pod, we SNAT

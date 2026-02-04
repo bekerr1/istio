@@ -107,7 +107,7 @@ func NewNftablesConfigurator(
 }
 
 // CreateInpodRules creates nftables rules within a pod's network namespace
-func (cfg *NftablesConfigurator) CreateInpodRules(log *istiolog.Scope, podOverrides config.PodLevelOverrides) error {
+func (cfg *NftablesConfigurator) CreateInpodRules(log *istiolog.Scope, podOverrides config.PodOverrides) error {
 	log.Info("native nftables enabled, using nft rules for inpod traffic redirection")
 
 	rules, err := cfg.AppendInpodRules(podOverrides)
@@ -130,7 +130,7 @@ func (cfg *NftablesConfigurator) CreateInpodRules(log *istiolog.Scope, podOverri
 	return nil
 }
 
-func (cfg *NftablesConfigurator) AppendInpodRules(podOverrides config.PodLevelOverrides) (*knftables.Transaction, error) {
+func (cfg *NftablesConfigurator) AppendInpodRules(podOverrides config.PodOverrides) (*knftables.Transaction, error) {
 	cfg.ruleBuilder = builder.NewNftablesRuleBuilder(config.GetConfig(cfg.cfg))
 
 	var redirectDNS bool
@@ -198,6 +198,8 @@ func (cfg *NftablesConfigurator) AppendInpodRules(podOverrides config.PodLevelOv
 			)
 		}
 	}
+
+	// TODO: (brendan) figure out the equvalent rule for interface exclusion
 
 	// CLI: nft add rule inet istio-ambient-mangle istio-prerouting meta mark & 0xfff == 0x539 counter ct mark set ct mark & 0xfffff000 | 0x111
 	// DESC: If we have a packet mark, set a connmark.

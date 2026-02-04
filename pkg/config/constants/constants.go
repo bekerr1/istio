@@ -206,6 +206,15 @@ const (
 	// Pods in this state will not egress/ingress traffic until an active ztunnel begins proxying them.
 	AmbientRedirectionPending = "pending"
 
+	// AmbientExcludedInterfaces is the annotation name for tracking which interfaces
+	// are currently excluded from ambient mesh redirection on a pod.
+	// This is set by the CNI after successfully configuring interface exclusion rules.
+	// The value is a comma-separated list of interface names (e.g., "eth1,eth2").
+	// An empty or missing annotation indicates no interfaces are excluded.
+	//
+	// TODO: This should be moved to istio.io/api/annotation package once this feature stabilizes.
+	AmbientExcludedInterfaces = "ambient.istio.io/excluded-interfaces"
+
 	// ServiceTraffic indicates that service traffic should go through the intended waypoint.
 	ServiceTraffic = "service"
 	// WorkloadTraffic indicates that workload traffic should go through the intended waypoint.
